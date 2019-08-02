@@ -1,0 +1,198 @@
+import tensorflow as tf
+import pandas as pd
+import numpy as np
+import cv2
+from random  import shuffle
+
+IMG_SIZE = 500
+BATCH_SIZE = 10
+INPUT_SHAPE = (500, 500, 3)
+TRAINING_IITERATIONS = 10
+TRAINING_ITER = 1
+
+
+eye_data_frame = pd.read_excel("",index_col="file_id")
+
+eye_data_frame.head()
+
+import collections
+collections.Counter(eye_data_frame['eye_class'])
+
+
+mask = np.random.rand(len(eye_data_frame)) < 0.8
+train = eye_data_frame[mask]
+test = eye_data_frame[~mask]
+
+
+test.shape
+
+train['eye_class'].value_counts()
+
+
+from sklearn.model_selection import train_test_split
+train_df, validation_df = train_test_split(train,test_size=0.2, random_state=42)
+
+def label_img(label):
+    if label == 'OD': return [1,0]
+    elif label == 'OS': return [0,1]
+
+def load_data(data_frame):
+    training_data = []
+    for index, row in data_frame.iterrows():
+        label = label_img(row["eye_class"])
+        img_data = cv2.imread(row["file_path"],cv2.IMREAD_GRAYSCALE)
+        img_data = cv2.resize(img_data,(IMG_SIZE,IMG_SIZE))
+        training_data.append([np.array(img_data),label])
+    shuffle(training_data)
+    return training_data 
+
+
+training_data = load_data(train_df)
+validation_data = load_data(validation_df)
+
+X = np.array([i[0] for i in training_data]).reshape(-1,IMG_SIZE,IMG_SIZE,1)
+Y = [i[1] for i in training_data]
+
+validation_x = np.array([i[0] for i in validation_data]).reshape(-1,IMG_SIZE,IMG_SIZE,1)
+validation_y = [i[1] for i in validation_data]
+
+print(X.shape)
+print(validation_x.shape)
+
+Y = np.asarray(Y, dtype=np.float32)
+
+x = tf.placeholder("float", [None, IMG_SIZE,IMG_SIZE,1])
+y = tf.placeholder("float", [None, 2])
+
+def conv2d(x,W,b,strides=1):
+    x = tf.nn.conv2d(x,W,strides=[1,strides,strides,1],padding="VALID")
+    x = tf.nn.bias_add(x,b)
+    return tf.nn.relu(x)
+    
+def maxpool2d(x, k=2):
+    return tf.nn.max_pool(x, ksize=[1, k, k, 1], strides=[1, k, k, 1],padding='VALID')
+
+
+#tf.reset_default_graph()
+weights = {
+    'wc1': tf.get_variable('W0_1', shape=(3,3,1,32), initializer=tf.contrib.layers.xavier_initializer()), 
+    'wc2': tf.get_variable('W1', shape=(3,3,32,64), initializer=tf.contrib.layers.xavier_initializer()), 
+    'wd1': tf.get_variable('W3', shape=(4*4*128,128), initializer=tf.contrib.layers.xavier_initializer()), 
+    'out': tf.get_variable('W6', shape=(128,2), initializer=tf.contrib.layers.xavier_initializer()), 
+}
+biases = {
+    'bc1': tf.get_variable('B0_1', shape=(32), initializer=tf.contrib.layers.xavier_initializer()),
+    'bc2': tf.get_variable('B1', shape=(64), initializer=tf.contrib.layers.xavier_initializer()),
+    'bd1': tf.get_variable('B3', shape=(128), initializer=tf.contrib.layers.xavier_initializer()),
+    'out': tf.get_variable('B4', shape=(2), initializer=tf.contrib.layers.xavier_initializer()),
+}
+
+
+
+def conv_net(x, weights, biases):  
+    # here we call the conv2d function we had defined above and pass the input image x, weights wc1 and bias bc1.
+    conv1 = conv2d(x, weights['wc1'], biases['bc1'])
+    # Max Pooling (down-sampling), this chooses the max value from a 2*2 matrix window and outputs a 14*14 matrix.
+    conv1 = maxpool2d(conv1, k=2)
+
+    # Convolution Layer
+    # here we call the conv2d function we had defined above and pass the input image x, weights wc2 and bias bc2.
+    conv2 = conv2d(conv1, weights['wc2'], biases['bc2'])
+    # Max Pooling (down-sampling), this chooses the max value from a 2*2 matrix window and outputs a 7*7 matrix.
+    conv2 = maxpool2d(conv2, k=2)
+
+    # Fully connected layer
+    # Reshape conv2 output to fit fully connected layer input
+    fc1 = tf.reshape(conv2, [-1, weights['wd1'].get_shape().as_list()[0]])
+    fc1 = tf.add(tf.matmul(fc1, weights['wd1']), biases['bd1'])
+    fc1 = tf.nn.relu(fc1)
+    # Output, class prediction
+    # finally we multiply the fully connected layer with the weights and add a bias term. 
+    out = tf.add(tf.matmul(fc1, weights['out']), biases['out'])
+    return out
+
+pred = conv_net(x, weights, biases)
+
+cost = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits=pred, labels=y))
+
+optimizer = tf.train.AdamOptimizer(learning_rate=0.001).minimize(cost)
+
+
+#Here you check whether the index of the maximum value of the predicted 
+#image is equal to the actual labelled image. and both will be a column vector.
+
+correct_prediction = tf.equal(tf.argmax(pred, 1), tf.argmax(y, 1))
+
+#calculate accuracy across all the given images and average them out. 
+accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
+
+init = tf.global_variables_initializer()
+
+
+with tf.Session() as sess:
+    sess.run(init) 
+    train_loss = []
+    test_loss = []
+    train_accuracy = []
+    test_accuracy = []
+    summary_writer = tf.summary.FileWriter('./Output', sess.graph)
+    for i in range(TRAINING_ITER):
+        for batch in range(len(X)//BATCH_SIZE):
+            batch_x = X[batch*BATCH_SIZE:min((batch+1)*BATCH_SIZE,len(X))]
+            batch_y = Y[batch*BATCH_SIZE:min((batch+1)*BATCH_SIZE,len(Y))]    
+            # Run optimization op (backprop).
+                # Calculate batch loss and accuracy
+            opt = sess.run(optimizer, feed_dict={x: batch_x,
+                                                              y: batch_y})
+            loss, acc = sess.run([cost, accuracy], feed_dict={x: batch_x,
+                                                              y: batch_y})
+        print("Iter " + str(i) + ", Loss= " + \
+                      "{:.6f}".format(loss) + ", Training Accuracy= " + \
+                      "{:.5f}".format(acc))
+        print("Optimization Finished!")
+
+        # Calculate accuracy for all 10000 mnist test images
+        test_acc,valid_loss = sess.run([accuracy,cost], feed_dict={x: validation_x,y : validation_y})
+        train_loss.append(loss)
+        test_loss.append(valid_loss)
+        train_accuracy.append(acc)
+        test_accuracy.append(test_acc)
+        print("Testing Accuracy:","{:.5f}".format(test_acc))
+    summary_writer.close()
+
+
+import os
+import pandas as pd
+
+class Data_sheet_generator:
+    
+    def __init__(self,src_dirt,tar_dirt,class_type):
+        self.src_dirt = src_dirt
+        self.tar_dirt = tar_dirt
+        self.class_type = class_type
+        
+    def create_data_array(self, directory ,sub_dir):
+        eye_data_array = []
+        for filename in os.listdir(directory):
+            row_array = []
+            row_array.append(filename)
+            row_array.append(directory+"/"+filename)
+            row_array.append(self.class_type[sub_dir])
+            eye_data_array.append(row_array)
+        return eye_data_array
+
+    def generate_data_sheet(self):
+        data_array = []
+        for sub_dir in os.listdir(self.src_dirt):
+            data_array= data_array + self.create_data_array(self.src_dirt+"/"+ sub_dir, sub_dir)
+        eye_data_frame  = pd.DataFrame(data_array,columns=["file_id","file_path","eye_class"])
+        eye_data_frame.set_index("file_id", inplace = True) 
+        eye_data_frame.to_excel(self.tar_dirt+ "Eye_Lat_data_preprocessed.xlsx")
+            
+data_gen_obj = Data_sheet_generator("/home/sandipan/Eye_lat/Preprocessed_data","/home/sandipan/Eye_lat/",{"OD":"OD","OS":"OS"})
+data_gen_obj.generate_data_sheet()
+
+
+
+
+
